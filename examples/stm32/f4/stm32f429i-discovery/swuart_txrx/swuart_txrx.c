@@ -25,15 +25,11 @@
 #include <libopencm3/stm32/flash.h>
 #include <libopencm3/stm32/exti.h>
 
-#define USE429 0
+#define DBG 0      //用於開啟某些 GPIO 來 debug
 
 #define SWUART_BAUD_RATE          9600//115200 //note: 跑 HSE 16M , TX 最高 38400 bps
-#define SWUART_TX_CLOCK           RCC_GPIOB //KC_DBG for 429 RCC_GPIOA    //bit value to set TX clock
-#if USE429
+#define SWUART_TX_CLOCK           RCC_GPIOB    //KC_DBG for 429; RCC_GPIOA    //bit value to set TX clock
 #define SWUART_TX_PORT            GPIOB        //the port TX assigned to
-#else
-#define SWUART_TX_PORT            GPIOB //KC_DBG for 429 GPIOA        //the port TX assigned to
-#endif
 #define SWUART_TX_PIN             GPIO4        //the pin TX assigned to
 
 #define SWUART_RX_CLOCK           RCC_GPIOA    //bit value to set RX clock
@@ -43,7 +39,6 @@
 #define SWUART_RX_EXTI            EXTI5             //the EXTI RX falling will trigger
 #define SWUART_RX_EXTI_ISR        exti9_5_isr       //the ISR hadling RX EXTI
 
-#if 1//USE429
 void delay_ms(uint32_t ms);
 
 static const struct rcc_clock_scale clock_setup =
@@ -62,50 +57,34 @@ static const struct rcc_clock_scale clock_setup =
     .apb1_frequency = 42000000,
     .apb2_frequency = 84000000,
 };
-#else
-/* standard clocking for F2 boards */
-static const struct rcc_clock_scale clock_setup =
-{
-        .pllm = 24,  //外頻 24 MHz 振盪器, 以下欲得到 120M 內頻
-        .plln = 240,
-        .pllp = 2,
-        .pllq = 5,
-        .hpre = RCC_CFGR_HPRE_DIV_NONE,
-        .ppre1 = RCC_CFGR_PPRE_DIV_4,
-        .ppre2 = RCC_CFGR_PPRE_DIV_2,
-        .flash_config = FLASH_ACR_ICE | FLASH_ACR_DCE | FLASH_ACR_LATENCY_5WS,
-        .apb1_frequency = 30000000,
-        .apb2_frequency = 60000000,
-};
-#endif
 
 /*
  * @brief    Set the GPIO used of this module.
  */
 static void gpio_setup(void)
 {
-    /**** init TX as output (ESC Err pin, PA4) *****/
-    // Enable TX pin clock.
+    /**** 初始化 TX 作為輸出 (ESC Err pin, PA4) *****/
+    // 設定 TX 時脈
     rcc_periph_clock_enable(SWUART_TX_CLOCK);
-    // Set TX pin to 'output pull up'.
+    // 設定 TX 輸出上拉
     gpio_mode_setup(SWUART_TX_PORT, GPIO_MODE_OUTPUT, GPIO_PUPD_PULLUP,
     SWUART_TX_PIN);
-    //set TX idle (High)
+    // TX 一開始輸出 high
     gpio_set(SWUART_TX_PORT, SWUART_TX_PIN);
 
-    /**** init RX as input (CH3 pin, PA5) *****/
-    // Enable GPIOC clock.
+    /**** 初始化 RX 作為輸入 (CH3 pin, PA5) *****/
+    // 設定 RX 時脈
     rcc_periph_clock_enable(SWUART_RX_CLOCK);
-    // Set RX pin to 'input no pull'.
+    // 設定 RX 為輸入
     gpio_mode_setup(SWUART_RX_PORT, GPIO_MODE_INPUT, GPIO_PUPD_NONE, //todo KC_DBG
     SWUART_RX_PIN);
 
-#if 1//USE429
-//    rcc_periph_clock_enable(RCC_GPIOG);
-//    /* Set GPIO13 (in GPIO port G) to 'output push-pull'. */
-//    gpio_mode_setup(GPIOG, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, GPIO13|GPIO14);
-//    gpio_clear(GPIOG, GPIO13);
-//    gpio_clear(GPIOG, GPIO14);
+#if DBG
+    rcc_periph_clock_enable(RCC_GPIOG);
+    /* Set GPIO13 (in GPIO port G) to 'output push-pull'. */
+    gpio_mode_setup(GPIOG, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, GPIO13|GPIO14);
+    gpio_clear(GPIOG, GPIO13);
+    gpio_clear(GPIOG, GPIO14);
 #endif
 }
 
@@ -114,79 +93,65 @@ static void gpio_setup(void)
  */
 static void swuart_init(void)
 {
-    /**** init for TX *****/
-    //enable DWT counter for measure delay time precisely.
+    // 啟用 DWT counter 作為精準 delay 計數
     dwt_enable_cycle_counter();
 
-    /**** init RX EXTI (CH3 pin, PA5) *****/
-    // Enable RX pin as EXTI (external interrut)
-    nvic_enable_irq(SWUART_RX_NVIC_EXTI_IRQ);
+    // RX_EXTI (ex. EXTI5) 選用作動的 port
     exti_select_source(SWUART_RX_EXTI, SWUART_RX_PORT);
+    // 指定下降緣觸發
     exti_set_trigger(SWUART_RX_EXTI, EXTI_TRIGGER_FALLING);
+    // 打開 RX_EXTI 中斷開關 & 觸發事件
     exti_enable_request(SWUART_RX_EXTI);
+    // 啟用 RX GPIO 巢狀中斷 (external interrut)
+    nvic_enable_irq(SWUART_RX_NVIC_EXTI_IRQ);
 
-    /**** initial Timer2 for RX*****/
-    // Enable TIM2 clock.
+    // 啟動 Timer2 時脈 (定時中斷用來取樣 RX)
     rcc_periph_clock_enable(RCC_TIM2);
-    //Enable TIM2 interrupt.
-    nvic_enable_irq(NVIC_TIM2_IRQ);
-    // Reset TIM2 peripheral to defaults.
+    // Reset Timer2 相關週邊
     rcc_periph_reset_pulse(RST_TIM2);
-    /* Timer global mode:
-     * - No divider / Alignment edge / Direction up
-     */
+    // 啟用 Timer2 巢狀中斷
+    nvic_enable_irq(NVIC_TIM2_IRQ);
+    // 設定 Timer2 計數模式 (方向)
     timer_set_mode(TIM2, TIM_CR1_CKD_CK_INT, TIM_CR1_CMS_EDGE, TIM_CR1_DIR_UP);
     // 不降頻
-#if USE429
-    /*
-     * 實驗紀錄：ex. prescaler(N-1) --> set_period(2*clock_setup.apb1_frequency / N -1)
-     *             則 timer 剛好 1 sec 中斷一次。
-     */
-    timer_set_prescaler(TIM2, SWUART_BAUD_RATE - 1);
-#else
     timer_set_prescaler(TIM2, 0);
-#endif
-
-    //算滿半個 bit 時間就中斷 (stm32f205 實證：Timer2 基頻 = CPU_FREP / 2 = 60 MHz)
+    // 計數滿半個 bit 時間就中斷
     //** note: STM32f429 timer2 受到 APB1 推動，每一個 H-L clock 推動 2 次 (count).
     timer_set_period(TIM2, ((2*clock_setup.apb1_frequency) / (2*SWUART_BAUD_RATE)) - 1);
-
-    /* Counter & IRQ enable. */
+    //打開 Timer2 更新中斷開關
     timer_enable_irq(TIM2, TIM_DIER_UIE);
-#if 1//USE429
-//   timer_set_counter(TIM2, 0);
-//   timer_enable_counter(TIM2);
+
+#if DBG
+    // Timer2 counter 歸零
+   timer_set_counter(TIM2, 0);
+   // Timer2 開始計數
+   timer_enable_counter(TIM2);
 #endif
 }
 
 #define SWUART_BITBUF_SIZE 20
-#if 1
 static uint8_t bitbuf[SWUART_BITBUF_SIZE];
-static uint8_t bit_index = 0;
-static uint8_t byte_tmp = 0;
-#endif
+static uint8_t bit_index = 0;  //標記 bitbuf[] 存取位置
+static uint8_t byte_tmp = 0;   //將 bit 併為 byte 存放處
 void tim2_isr(void)
 {
-#if 1
+    //發生 update (overflow) 事件
     if (timer_get_flag(TIM2, TIM_SR_UIF))
     {
-        //gpio_toggle(GPIOG, GPIO13); //red
-#if USE429
-        gpio_set(GPIOG, GPIO14); //red
-        delay_ms(1);
-        gpio_clear(GPIOG, GPIO14); //red
-#endif
+        //清除中斷事件旗標，避免持續觸發
         timer_clear_flag(TIM2, TIM_SR_UIF);
+        //counter 歸零，重新計數
         timer_set_counter(TIM2, 0);
+        //取樣 RX 位準
         bitbuf[bit_index] = gpio_get(SWUART_RX_PORT, SWUART_RX_PIN);
         bit_index++;
 
         if (bit_index == 18) //stop bit 1st sampling
         {
-            //restart to wait for falling edge of start bit.
+            //停止 counter 計數
             timer_disable_counter(TIM2);
 
-            //merge bit to byte
+            //合併 bit 成為 byte
             byte_tmp |= (bitbuf[3] != 0) ? 0x01 : 0; // bit 0
             byte_tmp |= (bitbuf[5] != 0) ? 0x02 : 0; // bit 1
             byte_tmp |= (bitbuf[7] != 0) ? 0x04 : 0; // bit 2
@@ -195,27 +160,16 @@ void tim2_isr(void)
             byte_tmp |= (bitbuf[13] != 0) ? 0x20 : 0; // bit 5
             byte_tmp |= (bitbuf[15] != 0) ? 0x40 : 0; // bit 6
             byte_tmp |= (bitbuf[17] != 0) ? 0x80 : 0; // bit 7
-
+            // bit 位置標記歸零
             bit_index = 0;
 
+            //啟動下一次 RX 下降緣中斷
             exti_reset_request(SWUART_RX_EXTI);
             nvic_enable_irq(SWUART_RX_NVIC_EXTI_IRQ);
 
             //todo push to queue
         }
-#if USE429
-        gpio_set(GPIOG, GPIO14); //red
-        delay_ms(100);
-        gpio_clear(GPIOG, GPIO14); //red
-#endif
     }
-#else
-
-    timer_clear_flag(TIM2, TIM_SR_UIF);
-    timer_set_counter(TIM2, 0);
-    gpio_toggle(GPIOG, GPIO14); //red
-
-#endif
 }
 
 /*
@@ -225,29 +179,18 @@ void tim2_isr(void)
  */
 void SWUART_RX_EXTI_ISR(void)
 {
-#if 1
-#if USE429
-    //亮燈辨識
-     gpio_set(GPIOG, GPIO13); //green
-     delay_ms(500);
-     gpio_clear(GPIOG, GPIO13); //green
-#endif
-
-    //關閉自身，交棒給 timer
+    //發生下降緣 ??
+    //關閉 EXTI 自身巢狀中斷，交棒給 timer
     nvic_disable_irq(SWUART_RX_NVIC_EXTI_IRQ);
 
+    //counter 歸零
     timer_set_counter(TIM2, 0);
+    //timer 開始計數
     timer_enable_counter(TIM2);
 
     //變數歸零
     bit_index = 0;
     byte_tmp = 0;
-
-#else
-    //reset exti means clear ISR flag and able to interrupt again.
-    //exti_reset_request(SWUART_RX_EXTI);
-    gpio_toggle(GPIOG, GPIO13); //green
-#endif
 }
 
 
@@ -411,6 +354,8 @@ int main(void)
 //            byte_tmp = 0;
 //        }
     }
+
+    swuart_send_byte(byte_tmp);
 
     return 0;
 }
