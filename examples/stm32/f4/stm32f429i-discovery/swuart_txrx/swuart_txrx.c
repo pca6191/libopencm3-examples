@@ -46,6 +46,8 @@
 
 static void delay_ms(uint32_t ms);
 static void swuart_send_byte(uint8_t b);
+void swuart_buf_put(uint8_t b);
+int16_t swuart_buf_get(void);
 
 static const struct rcc_clock_scale clock_setup =
 { /* 168MHz */
@@ -172,10 +174,9 @@ void tim2_isr(void)
 
             //啟動下一次 RX 下降緣中斷
             exti_enable_request(SWUART_RX_EXTI);
-            //nvic_enable_irq(SWUART_RX_NVIC_EXTI_IRQ);
 
             //todo push to queue
-            //swuart_send_byte(byte_tmp);
+            swuart_buf_put(byte_tmp);
         }
         //指向下一位
         bit_index++;
@@ -280,13 +281,49 @@ static void delay_ms(uint32_t ms)
     }
 }
 
+#define RXBUF_SIZE    256
+static unsigned rx_head = 0, rx_tail = 0;
+static uint8_t rx_buf[RXBUF_SIZE];
+
+/*
+ * @brief   將 1 個 byte, b, 放入 buffer 暫存。
+ */
+void swuart_buf_put(uint8_t b)
+{
+    uint16_t next = (rx_head + 1) % RXBUF_SIZE;
+
+    //放到 head 上，next 為 head 下個推進點。
+    //判斷確保下次推進不會蓋到 tail.==> head tail 倒追最接近時，之間仍留一個空位
+    if (next != rx_tail)
+    {
+        rx_buf[rx_head] = b;
+        rx_head = next;
+    }
+}
+
+/*
+ * @brief    從 buffer 中取出 1 byte.
+ * @return   取不到東西，就 return -1.
+ */
+int16_t swuart_buf_get(void)
+{
+    int16_t ret = -1;
+
+    if (rx_tail != rx_head)
+    {
+        ret = rx_buf[rx_tail];
+        rx_tail = (rx_tail + 1) % RXBUF_SIZE;
+    }
+    return ret;
+}
 
 /*
  * @brief    主程式。
  */
 #define TEST_TX_GPIO        0    //測試 TX H/L 變化
 #define TEST_TX_TRANSMITION 0    //測試 TX 傳送 0 ~ 255
-#define TEST_RX_ECHO        1    //測試 RX 收到 1 byte 且透過 TX echo
+#define TEST_RX_ECHO        0    //測試 RX 收到 1 byte 且透過 TX echo
+#define TEST_RING_BUFFER    1    //測試中斷取樣匯入 buffer, main loop echo 印出
 
 
 #if TEST_TX_GPIO //TX output only
@@ -364,6 +401,36 @@ int main(void)
         {
             swuart_send_byte(byte_tmp);
             byte_tmp = 0;
+        }
+    }
+
+    return 0;
+}
+#endif
+
+#if TEST_RING_BUFFER
+int main(void)
+{
+    uint16_t i;
+
+    //設置外頻，使得內頻為 168 MHz.
+    rcc_clock_setup_hse_3v3(&clock_setup);
+
+    //設置硬體 GPIO
+    gpio_setup();
+
+    //設置 software uart 用到的 timer/exti
+    swuart_init();
+
+    //非 0 即 echo
+    for(i = 0;; i++)
+    {
+        int16_t b;
+
+        b = swuart_buf_get();
+        if(b >= 0)
+        {
+            swuart_send_byte((uint8_t)b);
         }
     }
 
