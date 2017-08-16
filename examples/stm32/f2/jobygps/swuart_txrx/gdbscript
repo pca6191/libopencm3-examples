@@ -1,0 +1,5 @@
+#使用 $ arm-gdb-arm-none-eabi-gdb -tui -x gdbscript 來執行本命令稿
+file swuart_txrx.elf
+target remote localhost:4242
+b main
+c

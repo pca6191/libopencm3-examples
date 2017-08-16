@@ -1,0 +1,22 @@
+1. 切換 main 上方 TEST_XXX 的定義開關，進行各式展示。
+
+2. debug:
+
+   2.1. 開啟 $ st-util
+
+   2.2. 另一 terminal 視窗
+
+         $ arm-none-eabi-gdb -tui -x gdbscript
+
+        進入 gdb 界面進行 debug.
+
+3. 常用 gdb 指令範例:
+
+    gdb> p/x byte_tmp             # 以 %x 格式顯示 byte_tmp 變數值
+    gbd> b 123                    # 中斷點設在 123 列
+    gdb> del 123                  # 取消 123 列中斷點
+    gdb> display byte_tmp         # 持續觀察 byte_tmp 變數
+    gdb> display *bitbuf@20       # 持續觀察陣列 bytebuf[] 且顯示 20 個單位
+
+KC, 2017-08-16
+
