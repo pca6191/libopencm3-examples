@@ -26,6 +26,11 @@
 #include <libopencm3/stm32/exti.h>
 
 #define DBG 0      //用於開啟某些 GPIO 來 debug
+#if DBG
+#define LED_PORT              GPIOG
+#define LED_GREEN_PIN         GPIO13
+#define LED_RED_PIN           GPIO14
+#endif
 
 #define SWUART_BAUD_RATE          9600//115200 //note: 跑 HSE 16M , TX 最高 38400 bps
 #define SWUART_TX_CLOCK           RCC_GPIOB    //KC_DBG for 429; RCC_GPIOA    //bit value to set TX clock
@@ -39,7 +44,8 @@
 #define SWUART_RX_EXTI            EXTI5             //the EXTI RX falling will trigger
 #define SWUART_RX_EXTI_ISR        exti9_5_isr       //the ISR hadling RX EXTI
 
-void delay_ms(uint32_t ms);
+static void delay_ms(uint32_t ms);
+static void swuart_send_byte(uint8_t b);
 
 static const struct rcc_clock_scale clock_setup =
 { /* 168MHz */
@@ -82,9 +88,9 @@ static void gpio_setup(void)
 #if DBG
     rcc_periph_clock_enable(RCC_GPIOG);
     /* Set GPIO13 (in GPIO port G) to 'output push-pull'. */
-    gpio_mode_setup(GPIOG, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, GPIO13|GPIO14);
-    gpio_clear(GPIOG, GPIO13);
-    gpio_clear(GPIOG, GPIO14);
+    gpio_mode_setup(LED_PORT, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, LED_GREEN_PIN | LED_RED_PIN);
+    gpio_clear(LED_PORT, LED_GREEN_PIN);
+    gpio_clear(LED_PORT, LED_RED_PIN);
 #endif
 }
 
@@ -117,15 +123,16 @@ static void swuart_init(void)
     timer_set_prescaler(TIM2, 0);
     // 計數滿半個 bit 時間就中斷
     //** note: STM32f429 timer2 受到 APB1 推動，每一個 H-L clock 推動 2 次 (count).
-    timer_set_period(TIM2, ((2*clock_setup.apb1_frequency) / (2*SWUART_BAUD_RATE)) - 1);
+    //** note: 300, 為進入 timer 中斷的 overhead cyc clock 數，因 compile 優化或是 baudrate 而要特調
+    timer_set_period(TIM2, ((2*clock_setup.apb1_frequency) / (2*SWUART_BAUD_RATE)) - 1 - 300);
     //打開 Timer2 更新中斷開關
     timer_enable_irq(TIM2, TIM_DIER_UIE);
 
 #if DBG
-    // Timer2 counter 歸零
-   timer_set_counter(TIM2, 0);
-   // Timer2 開始計數
-   timer_enable_counter(TIM2);
+//    // Timer2 counter 歸零
+//   timer_set_counter(TIM2, 0);
+//   // Timer2 開始計數
+//   timer_enable_counter(TIM2);
 #endif
 }
 
@@ -144,14 +151,14 @@ void tim2_isr(void)
         timer_set_counter(TIM2, 0);
         //取樣 RX 位準
         bitbuf[bit_index] = gpio_get(SWUART_RX_PORT, SWUART_RX_PIN);
-        bit_index++;
 
-        if (bit_index == 18) //stop bit 1st sampling
+        if (bit_index == 19) //stop bit 1st sampling
         {
             //停止 counter 計數
             timer_disable_counter(TIM2);
 
             //合併 bit 成為 byte
+            byte_tmp = 0;
             byte_tmp |= (bitbuf[3] != 0) ? 0x01 : 0; // bit 0
             byte_tmp |= (bitbuf[5] != 0) ? 0x02 : 0; // bit 1
             byte_tmp |= (bitbuf[7] != 0) ? 0x04 : 0; // bit 2
@@ -164,11 +171,14 @@ void tim2_isr(void)
             bit_index = 0;
 
             //啟動下一次 RX 下降緣中斷
-            exti_reset_request(SWUART_RX_EXTI);
-            nvic_enable_irq(SWUART_RX_NVIC_EXTI_IRQ);
+            exti_enable_request(SWUART_RX_EXTI);
+            //nvic_enable_irq(SWUART_RX_NVIC_EXTI_IRQ);
 
             //todo push to queue
+            //swuart_send_byte(byte_tmp);
         }
+        //指向下一位
+        bit_index++;
     }
 }
 
@@ -179,18 +189,18 @@ void tim2_isr(void)
  */
 void SWUART_RX_EXTI_ISR(void)
 {
-    //發生下降緣 ??
     //關閉 EXTI 自身巢狀中斷，交棒給 timer
-    nvic_disable_irq(SWUART_RX_NVIC_EXTI_IRQ);
+    exti_reset_request(SWUART_RX_EXTI);
+    exti_disable_request(SWUART_RX_EXTI);
+
+    //變數歸零
+    bit_index = 0;
+    byte_tmp = 0;
 
     //counter 歸零
     timer_set_counter(TIM2, 0);
     //timer 開始計數
     timer_enable_counter(TIM2);
-
-    //變數歸零
-    bit_index = 0;
-    byte_tmp = 0;
 }
 
 
@@ -255,8 +265,11 @@ static void swuart_send_byte(uint8_t b)
     for(; DWT_CYCCNT < bitcnt;) { }
 }
 
-#if 1//USE429
-void delay_ms(uint32_t ms)
+/*
+ * @brief    使用最基本的 DWT cycle clock 來計數 delay 時間。
+ *           ** note: 使用前，要先設定一次 dwt_enable_cycle_counter();
+ */
+static void delay_ms(uint32_t ms)
 {
     for(; ms > 0; ms--)
     {
@@ -266,7 +279,6 @@ void delay_ms(uint32_t ms)
         { } //1 ms
     }
 }
-#endif
 
 
 /*
@@ -348,14 +360,12 @@ int main(void)
     //非 0 即 echo
     for(i = 0;; i++)
     {
-//        if(byte_tmp != 0)
-//        {
-//            swuart_send_byte(byte_tmp);
-//            byte_tmp = 0;
-//        }
+        if(byte_tmp != 0)
+        {
+            swuart_send_byte(byte_tmp);
+            byte_tmp = 0;
+        }
     }
-
-    swuart_send_byte(byte_tmp);
 
     return 0;
 }
