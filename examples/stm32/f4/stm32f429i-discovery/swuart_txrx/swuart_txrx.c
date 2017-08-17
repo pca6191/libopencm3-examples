@@ -32,7 +32,7 @@
 #define LED_RED_PIN           GPIO14
 #endif
 
-#define SWUART_BAUD_RATE          9600//115200 //note: 跑 HSE 16M , TX 最高 38400 bps
+#define SWUART_BAUD_RATE          115200 //note: 跑 HSE 16M , TX 最高 38400 bps
 #define SWUART_TX_CLOCK           RCC_GPIOB    //KC_DBG for 429; RCC_GPIOA    //bit value to set TX clock
 #define SWUART_TX_PORT            GPIOB        //the port TX assigned to
 #define SWUART_TX_PIN             GPIO4        //the pin TX assigned to
@@ -126,7 +126,7 @@ static void swuart_init(void)
     // 計數滿半個 bit 時間就中斷
     //** note: STM32f429 timer2 受到 APB1 推動，每一個 H-L clock 推動 2 次 (count).
     //** note: 300, 為進入 timer 中斷的 overhead cyc clock 數，因 compile 優化或是 baudrate 而要特調
-    timer_set_period(TIM2, ((2*clock_setup.apb1_frequency) / (2*SWUART_BAUD_RATE)) - 1 - 300);
+    timer_set_period(TIM2, ((2*clock_setup.apb1_frequency) / (SWUART_BAUD_RATE)) - 1 ); //one bit time
     //打開 Timer2 更新中斷開關
     timer_enable_irq(TIM2, TIM_DIER_UIE);
 
@@ -138,7 +138,7 @@ static void swuart_init(void)
 #endif
 }
 
-#define SWUART_BITBUF_SIZE 20
+#define SWUART_BITBUF_SIZE 10
 static uint8_t bitbuf[SWUART_BITBUF_SIZE];
 static uint8_t bit_index = 0;  //標記 bitbuf[] 存取位置
 static uint8_t byte_tmp = 0;   //將 bit 併為 byte 存放處
@@ -154,21 +154,21 @@ void tim2_isr(void)
         //取樣 RX 位準
         bitbuf[bit_index] = gpio_get(SWUART_RX_PORT, SWUART_RX_PIN);
 
-        if (bit_index == 19) //stop bit 1st sampling
+        if (bit_index == 9) //stop bit 1st sampling
         {
             //停止 counter 計數
             timer_disable_counter(TIM2);
 
             //合併 bit 成為 byte
             byte_tmp = 0;
-            byte_tmp |= (bitbuf[3] != 0) ? 0x01 : 0; // bit 0
-            byte_tmp |= (bitbuf[5] != 0) ? 0x02 : 0; // bit 1
-            byte_tmp |= (bitbuf[7] != 0) ? 0x04 : 0; // bit 2
-            byte_tmp |= (bitbuf[9] != 0) ? 0x08 : 0; // bit 3
-            byte_tmp |= (bitbuf[11] != 0) ? 0x10 : 0; // bit 4
-            byte_tmp |= (bitbuf[13] != 0) ? 0x20 : 0; // bit 5
-            byte_tmp |= (bitbuf[15] != 0) ? 0x40 : 0; // bit 6
-            byte_tmp |= (bitbuf[17] != 0) ? 0x80 : 0; // bit 7
+            byte_tmp |= (bitbuf[1] != 0) ? 0x01 : 0; // bit 0
+            byte_tmp |= (bitbuf[2] != 0) ? 0x02 : 0; // bit 1
+            byte_tmp |= (bitbuf[3] != 0) ? 0x04 : 0; // bit 2
+            byte_tmp |= (bitbuf[4] != 0) ? 0x08 : 0; // bit 3
+            byte_tmp |= (bitbuf[5] != 0) ? 0x10 : 0; // bit 4
+            byte_tmp |= (bitbuf[6] != 0) ? 0x20 : 0; // bit 5
+            byte_tmp |= (bitbuf[7] != 0) ? 0x40 : 0; // bit 6
+            byte_tmp |= (bitbuf[8] != 0) ? 0x80 : 0; // bit 7
             // bit 位置標記歸零
             bit_index = 0;
 
@@ -198,8 +198,9 @@ void SWUART_RX_EXTI_ISR(void)
     bit_index = 0;
     byte_tmp = 0;
 
-    //counter 歸零
-    timer_set_counter(TIM2, 0);
+    //counter 偷跑一些，讓中斷早一點發生，在 stop bit 作第 0 次取樣.
+    //偷跑 cyc 為 115200 half bit time.(可適用到 9600)
+    timer_set_counter(TIM2, 700);
     //timer 開始計數
     timer_enable_counter(TIM2);
 }
